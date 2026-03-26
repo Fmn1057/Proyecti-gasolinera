@@ -1,0 +1,19 @@
+{
+  "name": "bencinas-chile",
+  "version": "1.0.0",
+  "description": "Consulta de precios de combustibles cercanos en Chile (CNE + mapa)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test:cne": "node scripts/test-cne-login.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
+}
