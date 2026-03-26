@@ -99,6 +99,11 @@
           </details>
         </div>
 
+        <p class="cne-notice">
+          Los precios y las ubicaciones se obtienen de la
+          <strong>Comisión Nacional de Energía (CNE)</strong> mediante su API pública
+          (<a href="https://api.cne.cl/" target="_blank" rel="noopener noreferrer">api.cne.cl</a>).
+        </p>
         <p class="meta" id="meta"></p>
 
         <ul class="station-list" id="stationList"></ul>
@@ -114,15 +119,9 @@
           <p class="detail__addr" id="detailAddr"></p>
           <p class="detail__dist" id="detailDist"></p>
           <ul class="detail__prices" id="detailPrices"></ul>
-          <a
-            class="btn btn--maps"
-            id="detailMaps"
-            href="#"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
+          <button type="button" class="btn btn--maps" id="detailGoogleMaps">
             Abrir en Google Maps
-          </a>
+          </button>
         </aside>
       </section>
     </main>

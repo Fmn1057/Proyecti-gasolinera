@@ -3,16 +3,22 @@
  * - CNE_API_TOKEN: Bearer fijo hacia https://api.cne.cl/api/v4/estaciones
  * - O CNE_EMAIL + CNE_PASSWORD: POST https://api.cne.cl/api/login (form urlencoded) → token
  * - Sin credenciales o error al consultar la CNE: respuesta de error (no hay precios inventados).
+ * - Tras una descarga correcta se guarda data/cne-stations-backup.json; si la CNE falla, se sirve ese respaldo.
+ *   Opcional: CNE_STATIONS_BACKUP_PATH, CNE_BACKUP_MAX_AGE_HOURS.
+ * - Con CNE_EMAIL+CNE_PASSWORD: el token nuevo del login puede guardarse en .env (CNE_API_TOKEN). Desactivar: CNE_PERSIST_TOKEN_TO_ENV=0
+ * - data/station-corrections.json: ajustes locales por id CNE (coords, dirección, ocultar). Ver station-corrections.example.json
  */
 
 const path = require("path");
-require("dotenv").config({ path: path.join(__dirname, ".env") });
+const fs = require("fs/promises");
+const DOTENV_PATH = path.join(__dirname, ".env");
+require("dotenv").config({ path: DOTENV_PATH });
 const express = require("express");
 const cors = require("cors");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
-/** Renovación proactiva del token de login (minutos). No aplica si usas solo CNE_API_TOKEN. */
+/** Renovación proactiva por login (minutos). Activo si hay CNE_EMAIL + CNE_PASSWORD (aunque exista CNE_API_TOKEN). */
 const CNE_TOKEN_REFRESH_MS = Math.max(
   5 * 60 * 1000,
   (Number(process.env.CNE_TOKEN_REFRESH_MINUTES) > 0
@@ -29,6 +35,17 @@ const CNE_DISTRIBUIDORES_URL = `${CNE_BASE}/api/v4/combustible/vehicular/distrib
 /** División político-administrativa (documentación CNE). */
 const CNE_REGION_PATH = "/api/region";
 const cneComunaPath = (idRegion) => `/api/comuna/${encodeURIComponent(String(idRegion).trim())}`;
+
+/** Respaldo JSON de la última respuesta CNE correcta (lista nacional normalizada). */
+const CNE_STATIONS_BACKUP_PATH =
+  process.env.CNE_STATIONS_BACKUP_PATH || path.join(__dirname, "data", "cne-stations-backup.json");
+const STATION_CORRECTIONS_PATH =
+  process.env.STATION_CORRECTIONS_PATH || path.join(__dirname, "data", "station-corrections.json");
+/** Si está definido (>0), no se usa un respaldo más antiguo que estas horas. */
+const CNE_BACKUP_MAX_AGE_MS = (() => {
+  const h = Number(process.env.CNE_BACKUP_MAX_AGE_HOURS);
+  return Number.isFinite(h) && h > 0 ? h * 3600000 : 0;
+})();
 
 /** Token obtenido por login (se reutiliza en memoria; se renueva si la API rechaza el Bearer o por temporizador). */
 let cneTokenFromLogin = null;
@@ -219,6 +236,10 @@ function usesStaticCneToken() {
   return Boolean(String(process.env.CNE_API_TOKEN || "").trim());
 }
 
+function shouldPersistCneTokenToEnv() {
+  return String(process.env.CNE_PERSIST_TOKEN_TO_ENV ?? "1").trim() !== "0";
+}
+
 function hasCneLoginCredentials() {
   const email = String(process.env.CNE_EMAIL || "").trim();
   const pw = process.env.CNE_PASSWORD;
@@ -269,27 +290,84 @@ function jwtExpiresAtIso(token) {
   return null;
 }
 
+/** Valor seguro para una línea KEY=... en .env (JWT puede llevar = al final). */
+function quoteDotenvValue(value) {
+  return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r/g, "\\r").replace(/\n/g, "\\n")}"`;
+}
+
+/**
+ * Sustituye o añade CNE_API_TOKEN= en .env sin tocar el resto de líneas.
+ */
+async function writeCneApiTokenToDotenv(token) {
+  const key = "CNE_API_TOKEN";
+  const newLine = `${key}=${quoteDotenvValue(token)}`;
+  let raw = "";
+  try {
+    raw = await fs.readFile(DOTENV_PATH, "utf8");
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+  const lines = raw.split(/\r?\n/);
+  const keyRe = new RegExp(`^\\s*${key}\\s*=`);
+  let replaced = false;
+  const out = lines.map((line) => {
+    if (/^\s*#/.test(line)) return line;
+    if (keyRe.test(line)) {
+      replaced = true;
+      return newLine;
+    }
+    return line;
+  });
+  if (!replaced) {
+    if (out.length && out[out.length - 1] !== "") out.push("");
+    out.push(newLine);
+  }
+  await fs.writeFile(DOTENV_PATH, out.join("\n"), "utf8");
+}
+
+let cneLastTokenPersistedToDisk = null;
+
+/**
+ * Tras login CNE: actualiza memoria, process.env y opcionalmente .env.
+ */
+async function onCneLoginTokenObtained(token) {
+  if (!token || typeof token !== "string") return;
+  const t = token.trim();
+  if (!t) return;
+  cneTokenFromLogin = t;
+  cneLastTokenRefreshAt = new Date().toISOString();
+  process.env.CNE_API_TOKEN = t;
+  cneCatalogCache = null;
+  if (!shouldPersistCneTokenToEnv()) return;
+  if (t === cneLastTokenPersistedToDisk) return;
+  try {
+    await writeCneApiTokenToDotenv(t);
+    cneLastTokenPersistedToDisk = t;
+    console.log("[CNE] CNE_API_TOKEN actualizado en .env.");
+  } catch (e) {
+    console.warn("[CNE] No se pudo escribir .env:", e.message || e);
+  }
+}
+
 /**
  * Vuelve a llamar POST /api/login y actualiza el token en memoria.
  * Limpia caché de catálogo CNE para la próxima petición.
  */
 async function refreshCneLoginTokenSilent() {
-  if (usesStaticCneToken() || !hasCneLoginCredentials()) return false;
+  if (!hasCneLoginCredentials()) return false;
   if (cneLoginInFlight) return false;
   const t = await obtainCneTokenViaLogin();
   if (!t) {
     console.warn("[CNE] Renovación automática de token: login no devolvió token.");
     return false;
   }
-  cneTokenFromLogin = t;
-  cneLastTokenRefreshAt = new Date().toISOString();
-  cneCatalogCache = null;
+  await onCneLoginTokenObtained(t);
   console.log("[CNE] Token renovado automáticamente.");
   return true;
 }
 
 function startCneTokenAutoRefresh() {
-  if (usesStaticCneToken() || !hasCneLoginCredentials()) return;
+  if (!hasCneLoginCredentials()) return;
   if (cneTokenRefreshTimer) clearInterval(cneTokenRefreshTimer);
   refreshCneLoginTokenSilent().catch((e) => console.warn("[CNE] Primer refresh token:", e));
   cneTokenRefreshTimer = setInterval(() => {
@@ -308,7 +386,7 @@ async function getCneBearerToken() {
   cneLoginInFlight = (async () => {
     try {
       const t = await obtainCneTokenViaLogin();
-      if (t) cneTokenFromLogin = t;
+      if (t) await onCneLoginTokenObtained(t);
       return cneTokenFromLogin;
     } finally {
       cneLoginInFlight = null;
@@ -355,11 +433,11 @@ async function getCneJsonWithRetry(cneUrl) {
 
   let { res, body } = await fetchCneAuthorizedJson(cneUrl, bearer);
 
-  if (isCneAuthFailure(res, body) && hasCneLoginCredentials() && !usesStaticCneToken()) {
+  if (isCneAuthFailure(res, body) && hasCneLoginCredentials()) {
     cneTokenFromLogin = null;
     const fresh = await obtainCneTokenViaLogin();
     if (fresh) {
-      cneTokenFromLogin = fresh;
+      await onCneLoginTokenObtained(fresh);
       ({ res, body } = await fetchCneAuthorizedJson(cneUrl, fresh));
     }
   }
@@ -568,11 +646,11 @@ async function fetchCneStations() {
     return { ok: false, reason: "invalid_json", stations: [], catalog: cneCatalogCache };
   }
 
-  if (isCneAuthFailure(res, body) && hasCneLoginCredentials() && !usesStaticCneToken()) {
+  if (isCneAuthFailure(res, body) && hasCneLoginCredentials()) {
     cneTokenFromLogin = null;
     const fresh = await obtainCneTokenViaLogin();
     if (fresh) {
-      cneTokenFromLogin = fresh;
+      await onCneLoginTokenObtained(fresh);
       ({ res, body, reason } = await fetchCneStationsWithToken(fresh));
     }
   }
@@ -608,6 +686,146 @@ function attachDistance(stations, lat, lng) {
     ...s,
     distanceKm: Math.round(haversineKm(lat, lng, s.lat, s.lng) * 100) / 100,
   }));
+}
+
+let stationCorrectionsCache = null;
+let stationCorrectionsMtimeMs = null;
+
+function normalizeCorrectionsFile(parsed) {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const src = parsed.corrections && typeof parsed.corrections === "object" ? parsed.corrections : parsed;
+  const out = {};
+  for (const [k, v] of Object.entries(src)) {
+    if (String(k).startsWith("_")) continue;
+    if (!v || typeof v !== "object" || Array.isArray(v)) continue;
+    out[String(k).trim()] = v;
+  }
+  return out;
+}
+
+/**
+ * Lee correcciones locales (sin tocar la API CNE). Se recarga si el archivo cambia (mtime).
+ */
+async function loadStationCorrectionsMap() {
+  try {
+    const st = await fs.stat(STATION_CORRECTIONS_PATH);
+    const m = st.mtimeMs;
+    if (stationCorrectionsCache && stationCorrectionsMtimeMs === m) {
+      return stationCorrectionsCache;
+    }
+    const raw = await fs.readFile(STATION_CORRECTIONS_PATH, "utf8");
+    const map = normalizeCorrectionsFile(JSON.parse(raw));
+    stationCorrectionsCache = map;
+    stationCorrectionsMtimeMs = m;
+    return map;
+  } catch (e) {
+    if (e.code === "ENOENT") {
+      stationCorrectionsCache = {};
+      stationCorrectionsMtimeMs = null;
+      return {};
+    }
+    if (e instanceof SyntaxError) {
+      console.warn("[correcciones] JSON inválido en station-corrections:", e.message);
+    } else {
+      console.warn("[correcciones]", e.message || e);
+    }
+    return stationCorrectionsCache || {};
+  }
+}
+
+/**
+ * Aplica overrides por id de estación. `hide: true` excluye la fila.
+ */
+function applyStationCorrections(stations, correctionsById) {
+  if (!Array.isArray(stations) || !correctionsById || typeof correctionsById !== "object") {
+    return stations;
+  }
+  const out = [];
+  for (const s of stations) {
+    const id = String(s.id);
+    const c = correctionsById[id];
+    if (!c) {
+      out.push(s);
+      continue;
+    }
+    if (c.hide === true) continue;
+    const next = { ...s };
+    const la = parseCoordLatLng(c.lat);
+    const ln = parseCoordLatLng(c.lng);
+    if (!Number.isNaN(la) && !Number.isNaN(ln)) {
+      next.lat = la;
+      next.lng = ln;
+    }
+    if (c.name != null && String(c.name).trim()) next.name = String(c.name).trim();
+    if (c.address != null && String(c.address).trim()) next.address = String(c.address).trim();
+    if (c.comuna != null && String(c.comuna).trim()) next.comuna = String(c.comuna).trim();
+    out.push(next);
+  }
+  return out;
+}
+
+async function saveCneStationsBackup(cne) {
+  if (!cne || !cne.ok || !Array.isArray(cne.stations) || cne.stations.length === 0) return;
+  try {
+    const dir = path.dirname(CNE_STATIONS_BACKUP_PATH);
+    await fs.mkdir(dir, { recursive: true });
+    const record = {
+      savedAt: new Date().toISOString(),
+      stations: cne.stations,
+      catalog: cne.catalog || null,
+      rawStationCount: cne.rawStationCount ?? cne.stations.length,
+    };
+    await fs.writeFile(CNE_STATIONS_BACKUP_PATH, JSON.stringify(record), "utf8");
+  } catch (e) {
+    console.error("No se pudo guardar respaldo CNE:", e.message || e);
+  }
+}
+
+async function loadCneStationsBackup() {
+  try {
+    const raw = await fs.readFile(CNE_STATIONS_BACKUP_PATH, "utf8");
+    const data = JSON.parse(raw);
+    if (!data || !Array.isArray(data.stations) || data.stations.length === 0) return null;
+    if (CNE_BACKUP_MAX_AGE_MS > 0 && data.savedAt) {
+      const t = new Date(data.savedAt).getTime();
+      if (!Number.isFinite(t) || Date.now() - t > CNE_BACKUP_MAX_AGE_MS) return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function buildStationsSuccessPayload(lat, lng, radiusKm, stations, catalog, opts = {}) {
+  const {
+    source = "cne",
+    updatedAt,
+    fromBackup = false,
+    backupSavedAt,
+    backupReason,
+  } = opts;
+  const withDist = attachDistance(stations, lat, lng).filter((s) => s.distanceKm <= radiusKm);
+  const payload = {
+    ok: true,
+    source,
+    updatedAt: updatedAt ?? new Date().toISOString(),
+    radiusKm,
+    user: { lat, lng },
+    stations: withDist,
+  };
+  if (fromBackup) {
+    payload.fromBackup = true;
+    if (backupSavedAt) payload.backupSavedAt = backupSavedAt;
+    if (backupReason) payload.backupReason = backupReason;
+  }
+  if (catalog) {
+    payload.cneCatalog = {
+      tiposCombustibleCount: catalog.tiposCombustible?.length ?? 0,
+      distribuidoresCount: catalog.distribuidores?.length ?? 0,
+      catalogCachedAt: catalog.cachedAt,
+    };
+  }
+  return payload;
 }
 
 function stationsErrorPayload(lat, lng, radiusKm, errorCode, error, extra = {}) {
@@ -658,7 +876,8 @@ app.get("/favicon.ico", (_req, res) => {
 });
 
 app.get("/api/health", (_req, res) => {
-  const loginMode = !usesStaticCneToken() && hasCneLoginCredentials();
+  const loginMode = hasCneLoginCredentials();
+  const bearerPreview = String(process.env.CNE_API_TOKEN || "").trim() || cneTokenFromLogin;
   const payload = {
     ok: true,
     stack: "Node.js + Express (servidor) y JavaScript en el navegador; las llamadas a la CNE son HTTP desde Node (fetch).",
@@ -666,28 +885,22 @@ app.get("/api/health", (_req, res) => {
       staticToken: usesStaticCneToken(),
       loginCredentials: hasCneLoginCredentials(),
       tokenAutoRefreshActive: loginMode,
+      persistTokenToEnv: shouldPersistCneTokenToEnv(),
       tokenRefreshIntervalMinutes: Math.round(CNE_TOKEN_REFRESH_MS / 60000),
       lastTokenRefreshAt: cneLastTokenRefreshAt,
     },
   };
-  if (cneTokenFromLogin && loginMode) {
-    const jwtExp = jwtExpiresAtIso(cneTokenFromLogin);
+  if (bearerPreview && loginMode) {
+    const jwtExp = jwtExpiresAtIso(bearerPreview);
     if (jwtExp) payload.cne.jwtExpiresAt = jwtExp;
   }
   res.json(payload);
 });
 
 /**
- * Fuerza un nuevo login CNE y actualiza el token en memoria (útil para pruebas).
- * Solo tiene efecto si usas CNE_EMAIL + CNE_PASSWORD (no token estático).
+ * Fuerza un nuevo login CNE y actualiza token en memoria, process.env y (si aplica) .env.
  */
 app.post("/api/cne/refresh-token", async (_req, res) => {
-  if (usesStaticCneToken()) {
-    return res.status(400).json({
-      ok: false,
-      error: "Con CNE_API_TOKEN no hay renovación por login; el token es el del .env hasta que lo cambies.",
-    });
-  }
   if (!hasCneLoginCredentials()) {
     return res.status(503).json({ ok: false, error: "Configura CNE_EMAIL y CNE_PASSWORD en .env." });
   }
@@ -758,34 +971,45 @@ app.get("/api/stations", async (req, res) => {
     });
   }
 
+  const corrections = await loadStationCorrectionsMap();
+
   let cne;
   try {
     cne = await fetchCneStations();
   } catch (e) {
     console.error(e);
-    return res
-      .status(502)
-      .json(
-        stationsErrorPayload(
-          lat,
-          lng,
-          radiusKm,
-          "upstream",
-          "No se pudo conectar con la API CNE. Revisa tu red o el estado del servicio."
-        )
-      );
+    cne = { ok: false, reason: "upstream", stations: [], catalog: null };
   }
 
+  const respondFromBackupIfAny = async (backupReason) => {
+    const snap = await loadCneStationsBackup();
+    if (!snap) return false;
+    const stationsAdj = applyStationCorrections(snap.stations, corrections);
+    const payload = buildStationsSuccessPayload(lat, lng, radiusKm, stationsAdj, snap.catalog, {
+      source: "file_backup",
+      updatedAt: snap.savedAt,
+      fromBackup: true,
+      backupSavedAt: snap.savedAt,
+      backupReason,
+    });
+    res.json(payload);
+    return true;
+  };
+
   if (!cne.ok) {
-    return res
-      .status(503)
-      .json(
-        stationsErrorPayload(lat, lng, radiusKm, cne.reason || "unknown", messageForCneFailure(cne.reason || "unknown"))
-      );
+    if (await respondFromBackupIfAny(cne.reason || "upstream")) return;
+    const errCode = cne.reason === "upstream" ? "upstream" : cne.reason || "unknown";
+    const errMsg =
+      errCode === "upstream"
+        ? "No se pudo conectar con la API CNE. Revisa tu red o el estado del servicio."
+        : messageForCneFailure(errCode);
+    const status = errCode === "upstream" ? 502 : 503;
+    return res.status(status).json(stationsErrorPayload(lat, lng, radiusKm, errCode, errMsg));
   }
 
   if (cne.stations.length === 0) {
     const raw = cne.rawStationCount ?? 0;
+    if (await respondFromBackupIfAny(raw > 0 ? "normalize_failed" : "empty_catalog")) return;
     if (raw > 0) {
       return res.status(503).json(
         stationsErrorPayload(
@@ -810,38 +1034,31 @@ app.get("/api/stations", async (req, res) => {
     );
   }
 
-  const withDist = attachDistance(cne.stations, lat, lng).filter((s) => s.distanceKm <= radiusKm);
-
-  const payload = {
-    ok: true,
+  const stationsAdj = applyStationCorrections(cne.stations, corrections);
+  const payload = buildStationsSuccessPayload(lat, lng, radiusKm, stationsAdj, cne.catalog, {
     source: "cne",
     updatedAt: new Date().toISOString(),
-    radiusKm,
-    user: { lat, lng },
-    stations: withDist,
-  };
-
-  if (cne.catalog) {
-    payload.cneCatalog = {
-      tiposCombustibleCount: cne.catalog.tiposCombustible?.length ?? 0,
-      distribuidoresCount: cne.catalog.distribuidores?.length ?? 0,
-      catalogCachedAt: cne.catalog.cachedAt,
-    };
-  }
-
+  });
   res.json(payload);
+  saveCneStationsBackup(cne);
 });
 
 app.listen(PORT, () => {
   console.log(`Bencinas Chile en http://localhost:${PORT}`);
-  if (usesStaticCneToken()) {
-    console.log("Modo CNE: Bearer desde CNE_API_TOKEN (sin renovación automática por login)");
-  } else if (hasCneLoginCredentials()) {
+  if (hasCneLoginCredentials()) {
     console.log(
-      `Modo CNE: token vía POST /api/login; renovación automática cada ${Math.round(CNE_TOKEN_REFRESH_MS / 60000)} min`
+      `Modo CNE: renovación por login cada ${Math.round(CNE_TOKEN_REFRESH_MS / 60000)} min; Bearer en memoria y ${
+        shouldPersistCneTokenToEnv() ? "actualización de CNE_API_TOKEN en .env" : "sin escribir .env (CNE_PERSIST_TOKEN_TO_ENV=0)"
+      }`
     );
+    if (usesStaticCneToken()) {
+      console.log("  (También hay CNE_API_TOKEN en .env: se sobrescribe al obtener un token nuevo por login.)");
+    }
     startCneTokenAutoRefresh();
+  } else if (usesStaticCneToken()) {
+    console.log("Modo CNE: solo CNE_API_TOKEN (sin CNE_EMAIL/CNE_PASSWORD no hay renovación automática por login)");
   } else {
     console.log("Sin credenciales CNE: /api/stations responderá error hasta configurar .env");
   }
+  console.log(`Correcciones de estaciones: ${STATION_CORRECTIONS_PATH} (opcional; ver station-corrections.example.json)`);
 });

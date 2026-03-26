@@ -24,7 +24,7 @@ const detailTitle = document.getElementById("detailTitle");
 const detailAddr = document.getElementById("detailAddr");
 const detailDist = document.getElementById("detailDist");
 const detailPrices = document.getElementById("detailPrices");
-const detailMaps = document.getElementById("detailMaps");
+const detailGoogleMaps = document.getElementById("detailGoogleMaps");
 const brandSelectRow = document.getElementById("brandSelectRow");
 const brandSelectEl = document.getElementById("brandSelect");
 
@@ -108,8 +108,12 @@ function setStatus(text, isError = false) {
   statusEl.classList.toggle("is-error", isError);
 }
 
+/** Google Maps con las coordenadas CNE (sin API key). */
 function googleMapsUrl(lat, lng) {
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lng}`)}`;
+  const la = Number(lat);
+  const ln = Number(lng);
+  if (!Number.isFinite(la) || !Number.isFinite(ln)) return "#";
+  return `https://www.google.com/maps?q=${la},${ln}`;
 }
 
 function invalidateMapSize() {
@@ -340,6 +344,22 @@ function renderList() {
 
     row.appendChild(dist);
     row.appendChild(priceSpan);
+
+    const mapsActions = document.createElement("div");
+    mapsActions.className = "station-card__maps-actions";
+    const gUrl = googleMapsUrl(s.lat, s.lng);
+    const btnGm = document.createElement("button");
+    btnGm.type = "button";
+    btnGm.className = "btn btn--card-maps";
+    btnGm.textContent = "Google Maps";
+    btnGm.disabled = gUrl === "#";
+    btnGm.setAttribute("aria-label", "Abrir ubicación en Google Maps");
+    btnGm.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (gUrl !== "#") window.open(gUrl, "_blank", "noopener,noreferrer");
+    });
+    mapsActions.appendChild(btnGm);
+
     btn.appendChild(name);
     if (s.marca) {
       const marcaTag = document.createElement("p");
@@ -350,6 +370,7 @@ function renderList() {
     btn.appendChild(addr);
     btn.appendChild(row);
     btn.appendChild(mini);
+    btn.appendChild(mapsActions);
 
     btn.addEventListener("click", () => selectStation(s));
     li.appendChild(btn);
@@ -363,7 +384,14 @@ function showDetail(s) {
   const marcaLine = s.marca ? `${s.marca} · ` : "";
   detailAddr.textContent = marcaLine + [s.address, s.comuna].filter(Boolean).join(" · ");
   detailDist.textContent = `Distancia: ${s.distanceKm.toFixed(2)} km`;
-  detailMaps.href = googleMapsUrl(s.lat, s.lng);
+
+  if (detailGoogleMaps) {
+    const gUrl = googleMapsUrl(s.lat, s.lng);
+    detailGoogleMaps.disabled = gUrl === "#";
+    detailGoogleMaps.onclick = () => {
+      if (gUrl !== "#") window.open(gUrl, "_blank", "noopener,noreferrer");
+    };
+  }
 
   detailPrices.innerHTML = "";
   for (const [k, label] of Object.entries(FUEL_LABELS)) {
@@ -427,8 +455,13 @@ function updateMarkers() {
       pf != null
         ? `<div><strong>${FUEL_LABELS[fuelKey]}:</strong> ${formatMoney(pf)}</div>`
         : "";
+    const gUrl = googleMapsUrl(s.lat, s.lng);
+    const gLink =
+      gUrl !== "#"
+        ? `<div style="margin-top:0.45rem"><a href="${escapeAttr(gUrl)}" target="_blank" rel="noopener noreferrer">Google Maps</a></div>`
+        : "";
     m.bindPopup(
-      `<div style="min-width:160px"><strong>${escapeHtml(s.name)}</strong><br/>${priceLine}<small>${s.distanceKm.toFixed(2)} km</small><br/><a href="${googleMapsUrl(s.lat, s.lng)}" target="_blank" rel="noopener">Google Maps</a></div>`
+      `<div style="min-width:160px"><strong>${escapeHtml(s.name)}</strong><br/>${priceLine}<small>${s.distanceKm.toFixed(2)} km</small>${gLink}</div>`
     );
     m.on("click", () => selectStation(s));
     stationMarkers.set(s.id, m);
@@ -439,6 +472,11 @@ function escapeHtml(str) {
   const d = document.createElement("div");
   d.textContent = str;
   return d.innerHTML;
+}
+
+/** Para atributo `href` en HTML generado (p. ej. popups Leaflet). */
+function escapeAttr(str) {
+  return String(str).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 }
 
 async function loadStations() {
@@ -482,16 +520,19 @@ async function loadStations() {
 
     lastPayload = data;
     const u = lastPayload.user;
-    const pos =
-      u && typeof u.lat === "number" && typeof u.lng === "number"
-        ? ` · Mapa/lista usan: ${u.lat.toFixed(5)}, ${u.lng.toFixed(5)}`
-        : "";
-    let src = "Fuente: API CNE (precios oficiales)";
+    const metaParts = [];
+    if (lastPayload.fromBackup) {
+      metaParts.push("Lista desde respaldo local (la API CNE no respondió en este momento)");
+    }
     if (lastPayload.cneCatalog) {
       const c = lastPayload.cneCatalog;
-      src += ` · Catálogo: ${c.tiposCombustibleCount} tipos, ${c.distribuidoresCount} distribuidores`;
+      metaParts.push(`${c.tiposCombustibleCount} tipos de combustible, ${c.distribuidoresCount} distribuidores (catálogo CNE)`);
     }
-    metaEl.textContent = `${src}${pos} · Actualizado: ${new Date(lastPayload.updatedAt).toLocaleString("es-CL")}`;
+    if (u && typeof u.lat === "number" && typeof u.lng === "number") {
+      metaParts.push(`Mapa/lista: ${u.lat.toFixed(5)}, ${u.lng.toFixed(5)}`);
+    }
+    metaParts.push(`Actualizado: ${new Date(lastPayload.updatedAt).toLocaleString("es-CL")}`);
+    metaEl.textContent = metaParts.join(" · ");
 
     populateBrandSelect(lastPayload.stations);
 

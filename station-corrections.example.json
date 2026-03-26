@@ -1,0 +1,15 @@
+{
+  "_info": "Copia este archivo a data/station-corrections.json (la carpeta data no va a git). Clave = codigo/id de la estación en la CNE (el mismo que ves en la app o en la respuesta /api/stations).",
+  "CO12345": {
+    "lat": -33.4489,
+    "lng": -70.6693,
+    "address": "Av. Ejemplo 1234",
+    "comuna": "Santiago",
+    "note": "Pin oficial CNE corrido; ajustado con coordenadas de terreno.",
+    "hide": false
+  },
+  "CO99999": {
+    "hide": true,
+    "note": "Estación duplicada/errónea en CNE: no mostrar."
+  }
+}
