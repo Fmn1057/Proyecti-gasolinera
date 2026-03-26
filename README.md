@@ -122,7 +122,7 @@ Si en el futuro quisieras incrustar el mapa de Google en la página, necesitarí
 ## Geolocalización
 
 - **HTTPS o localhost**: el navegador permite pedir ubicación con permiso del usuario.
-- **Celular abriendo `http://IP-de-tu-PC:3000`**: muchos navegadores tratan eso como contexto **no seguro** y **bloquean** el GPS. Soluciones: publicar con **HTTPS**, usar un túnel tipo **ngrok**, o usar la sección **«Ubicación manual»** en la app (lat/lng).
+- **Celular abriendo `http://IP-de-tu-PC:3000`**: muchos navegadores tratan eso como contexto **no seguro** y **bloquean** el GPS. Soluciones: publicar con **HTTPS** o usar un túnel tipo **ngrok**; la app usará una ubicación de referencia si el GPS no está disponible.
 - La app hace **varios intentos** (alta/baja precisión y `watchPosition`) para mejorar el resultado en Android/iOS.
 
 Tras actualizar el código del **servidor** (`server.js`), reinicia con `Ctrl+C` y `npm start` para que el campo **`marca`** (COPEC, Shell, etc.) llegue al navegador y el filtro de distribuidores funcione.

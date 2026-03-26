@@ -14,9 +14,6 @@ const radiusEl = document.getElementById("radius");
 const radiusValueEl = document.getElementById("radiusValue");
 const btnRefresh = document.getElementById("btnRefresh");
 const btnGeo = document.getElementById("btnGeo");
-const btnManualGeo = document.getElementById("btnManualGeo");
-const manualLatEl = document.getElementById("manualLat");
-const manualLngEl = document.getElementById("manualLng");
 const autoRefreshEl = document.getElementById("autoRefresh");
 const detailEl = document.getElementById("detail");
 const detailClose = document.getElementById("detailClose");
@@ -614,7 +611,7 @@ function geoErrorMessage(code) {
     case 2:
       return "Ubicación no disponible: active el GPS y los servicios de ubicación; pruebe al aire libre o cerca de una ventana.";
     case 3:
-      return "Tiempo agotado esperando el GPS: pulse «Pedir ubicación» de nuevo o use coordenadas manuales.";
+      return "Tiempo agotado esperando el GPS: pulse «Pedir ubicación» de nuevo.";
     default:
       return "No se pudo obtener la ubicación.";
   }
@@ -650,7 +647,7 @@ async function getLocation() {
     applyUserPosition(
       -33.4489,
       -70.6693,
-      "Este navegador no expone geolocalización. Use «Ubicación manual» abajo.",
+      "Este navegador no expone geolocalización. Se usará una ubicación de referencia (Santiago).",
       true
     );
     return;
@@ -659,7 +656,7 @@ async function getLocation() {
   const insecure = isLikelyInsecureGeoBlocked();
   if (insecure) {
     setStatus(
-      "Página en HTTP (sin HTTPS): en el celular el GPS suele estar bloqueado si entra por http://192.168… Intentando ubicación; si falla, use coordenadas manuales o un túnel HTTPS (ngrok).",
+      "Página en HTTP (sin HTTPS): en el celular el GPS suele estar bloqueado si entra por http://192.168… Intentando ubicación; si falla, use HTTPS o un túnel (p. ej. ngrok).",
       true
     );
     await new Promise((r) => setTimeout(r, 500));
@@ -677,7 +674,7 @@ async function getLocation() {
         applyUserPosition(
           -33.4489,
           -70.6693,
-          `${geoErrorMessage(1)}${extra} Referencia: Santiago centro; use coordenadas manuales si lo necesita.`,
+          `${geoErrorMessage(1)}${extra} Referencia: Santiago centro.`,
           true
         );
         return;
@@ -696,7 +693,7 @@ async function getLocation() {
   } catch (err) {
     const code = err && typeof err.code === "number" ? err.code : 0;
     const extra = insecure
-      ? " Si entra por http://192.168… en el celular, configure HTTPS o use lat/lng manuales."
+      ? " Si entra por http://192.168… en el celular, configure HTTPS o un túnel."
       : "";
     applyUserPosition(
       -33.4489,
@@ -736,19 +733,6 @@ radiusEl.addEventListener("change", () => {
 
 btnRefresh.addEventListener("click", () => loadStations());
 btnGeo.addEventListener("click", () => getLocation());
-btnManualGeo.addEventListener("click", () => {
-  const lat = parseFloat(String(manualLatEl.value).replace(",", "."));
-  const lng = parseFloat(String(manualLngEl.value).replace(",", "."));
-  if (Number.isNaN(lat) || Number.isNaN(lng)) {
-    setStatus("Ingrese latitud y longitud numéricas (ej. Chile: -33.45 y -70.67).", true);
-    return;
-  }
-  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-    setStatus("Latitud debe estar entre -90 y 90; longitud entre -180 y 180.", true);
-    return;
-  }
-  applyUserPosition(lat, lng, "Usando coordenadas manuales. Cargando precios…");
-});
 autoRefreshEl.addEventListener("change", scheduleRefresh);
 
 window.addEventListener("resize", () => invalidateMapSize());
