@@ -17,8 +17,30 @@
   <body>
     <header class="header">
       <div class="header__inner">
-        <h1 class="logo">Bencinas Chile</h1>
-        <p class="tagline">Precios oficiales CNE en estaciones cercanas</p>
+        <div class="header__top">
+          <div>
+            <h1 class="logo">Bencinas Chile</h1>
+            <p class="tagline">Precios oficiales CNE en estaciones cercanas</p>
+          </div>
+          <button type="button" class="btn btn--ai-open" id="btnAiOpen" title="Asistente IA">
+            <span class="ai-icon">✦</span> Asistente IA
+          </button>
+        </div>
+
+        <div class="search-bar" role="search">
+          <input
+            type="text"
+            id="addressSearch"
+            class="search-input"
+            placeholder="Buscar dirección o lugar en Chile…"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button type="button" class="btn btn--search" id="btnSearchGeo" aria-label="Buscar">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </button>
+          <ul class="search-results" id="searchResults" hidden></ul>
+        </div>
       </div>
     </header>
 
@@ -57,7 +79,7 @@
             <select id="brandSelect" class="select" aria-describedby="brandSelectHint">
               <option value="">Todas las marcas</option>
             </select>
-            <p class="field-hint" id="brandSelectHint">Solo se muestran en la lista y el mapa las estaciones de la marca elegida.</p>
+            <p class="field-hint" id="brandSelectHint">Solo se muestran las estaciones de la marca elegida.</p>
           </div>
 
           <div class="control-row control-row--inline">
@@ -107,8 +129,34 @@
 
     <footer class="footer">
       <span>Datos: API CNE (<a href="https://api.cne.cl/" target="_blank" rel="noopener">api.cne.cl</a>) — sin credenciales o si falla la API, se muestra error (no hay precios inventados).</span>
-      <span>Mapa: © OpenStreetMap · Leaflet</span>
+      <span>Mapa: © OpenStreetMap · Leaflet · Geocodificación: Nominatim</span>
     </footer>
+
+    <!-- AI Chat Widget -->
+    <div class="ai-panel" id="aiPanel" hidden>
+      <div class="ai-panel__header">
+        <span class="ai-panel__title">✦ Asistente IA</span>
+        <button type="button" class="ai-panel__close" id="btnAiClose" aria-label="Cerrar asistente">×</button>
+      </div>
+      <div class="ai-messages" id="aiMessages">
+        <div class="ai-msg ai-msg--bot">
+          <span>Hola! Soy tu asistente de combustibles. Puedo ayudarte a comparar precios, calcular ahorro o encontrar la estación más conveniente. ¿Qué necesitas?</span>
+        </div>
+      </div>
+      <form class="ai-input-row" id="aiForm" autocomplete="off">
+        <input
+          type="text"
+          class="ai-input"
+          id="aiInput"
+          placeholder="¿Cuánto ahorro si lleno 40L en la más barata?"
+          autocomplete="off"
+          maxlength="300"
+        />
+        <button type="submit" class="btn btn--ai-send" id="btnAiSend">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
+        </button>
+      </form>
+    </div>
 
     <script
       src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"

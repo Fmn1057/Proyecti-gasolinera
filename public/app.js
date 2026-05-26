@@ -6,6 +6,9 @@ const FUEL_LABELS = {
   glp_vehicular: "GLP vehicular",
 };
 
+const TREND_ICON = { up: "↑", down: "↓", same: "→", new: "" };
+const TREND_COLOR = { up: "#f4a261", down: "#2ecc71", same: "#8b9cb3", new: "" };
+
 const statusEl = document.getElementById("status");
 const metaEl = document.getElementById("meta");
 const stationListEl = document.getElementById("stationList");
@@ -25,29 +28,26 @@ const detailGoogleMaps = document.getElementById("detailGoogleMaps");
 const brandSelectRow = document.getElementById("brandSelectRow");
 const brandSelectEl = document.getElementById("brandSelect");
 
-const BRAND_OTROS_KEY = "OTROS";
+// Address search
+const addressSearchEl = document.getElementById("addressSearch");
+const btnSearchGeo = document.getElementById("btnSearchGeo");
+const searchResultsEl = document.getElementById("searchResults");
 
-/** Mismo criterio que server.js (orden: cadenas largas antes que subcadenas ambiguas). */
+// AI panel
+const aiPanelEl = document.getElementById("aiPanel");
+const btnAiOpen = document.getElementById("btnAiOpen");
+const btnAiClose = document.getElementById("btnAiClose");
+const aiMessagesEl = document.getElementById("aiMessages");
+const aiFormEl = document.getElementById("aiForm");
+const aiInputEl = document.getElementById("aiInput");
+
+const BRAND_OTROS_KEY = "OTROS";
+const LAST_LOCATION_KEY = "bencinas_last_location";
+
 const MARCAS_INFERIR_CLIENT = [
-  "PETRONEXT",
-  "PETROBRAS",
-  "ABASTIBLE",
-  "COPEC",
-  "SHELL",
-  "TERPEL",
-  "LIPIGAS",
-  "FULLPRIX",
-  "MAXPETRO",
-  "AXION",
-  "ESSO",
-  "GULF",
-  "NACIONAL",
-  "BRAED",
-  "FULL",
-  "SIN BANDERA",
-  "ENEX",
-  "ARAMCO",
-  "GASCO",
+  "PETRONEXT", "PETROBRAS", "ABASTIBLE", "COPEC", "SHELL", "TERPEL",
+  "LIPIGAS", "FULLPRIX", "MAXPETRO", "AXION", "ESSO", "GULF",
+  "NACIONAL", "BRAED", "FULL", "SIN BANDERA", "ENEX", "ARAMCO", "GASCO",
 ];
 
 function inferMarcaDesdeTextoCliente(...textos) {
@@ -74,7 +74,6 @@ function inferMarcaDesdeCodigoCliente(codigo) {
   return "";
 }
 
-/** Marca usable para filtro y etiqueta (respaldos si el API no envía `marca`). */
 function resolvedMarcaForStation(s) {
   let m = (s.marca || "").trim();
   if (!m && s.name) {
@@ -92,6 +91,7 @@ function resolvedMarcaForStation(s) {
 
 let map;
 let userMarker;
+let accuracyCircle;
 const stationMarkers = new Map();
 let userLat;
 let userLng;
@@ -99,13 +99,13 @@ let lastPayload = null;
 let sortMode = "price";
 let selectedId = null;
 let refreshTimer = null;
+let geocodeTimer = null;
 
 function setStatus(text, isError = false) {
   statusEl.textContent = text;
   statusEl.classList.toggle("is-error", isError);
 }
 
-/** Google Maps con las coordenadas CNE (sin API key). */
 function googleMapsUrl(lat, lng) {
   const la = Number(lat);
   const ln = Number(lng);
@@ -115,16 +115,22 @@ function googleMapsUrl(lat, lng) {
 
 function invalidateMapSize() {
   if (!map) return;
-  requestAnimationFrame(() => {
-    map.invalidateSize();
-  });
+  requestAnimationFrame(() => map.invalidateSize());
   setTimeout(() => map.invalidateSize(), 200);
 }
 
-function initMap(lat, lng) {
+function initMap(lat, lng, accuracyM) {
   if (map) {
     map.setView([lat, lng], 13);
     userMarker.setLatLng([lat, lng]);
+    if (accuracyCircle) {
+      if (accuracyM && accuracyM > 0) {
+        accuracyCircle.setLatLng([lat, lng]).setRadius(accuracyM);
+        accuracyCircle.addTo(map);
+      } else {
+        map.removeLayer(accuracyCircle);
+      }
+    }
     invalidateMapSize();
     return;
   }
@@ -134,18 +140,26 @@ function initMap(lat, lng) {
     maxZoom: 19,
   }).addTo(map);
 
-  userMarker = L.marker([lat, lng], {
-    title: "Tu ubicación",
-  }).addTo(map);
+  userMarker = L.marker([lat, lng], { title: "Tu ubicación" }).addTo(map);
   userMarker.bindPopup("<strong>Tu ubicación</strong>").openPopup();
+
+  accuracyCircle = L.circle([lat, lng], {
+    radius: accuracyM || 0,
+    color: "#3dd6c3",
+    fillColor: "#3dd6c3",
+    fillOpacity: 0.08,
+    weight: 1.5,
+  });
+  if (accuracyM && accuracyM > 0) accuracyCircle.addTo(map);
+
   invalidateMapSize();
 }
 
-function applyUserPosition(lat, lng, statusText, isError = false) {
+function applyUserPosition(lat, lng, statusText, isError = false, accuracyM) {
   userLat = lat;
   userLng = lng;
   setStatus(statusText, isError);
-  initMap(userLat, userLng);
+  initMap(userLat, userLng, accuracyM);
   loadStations();
 }
 
@@ -188,6 +202,12 @@ function cheapestIdForFuel(stations, fuelKey) {
     }
   }
   return best;
+}
+
+function averagePriceForFuel(stations, fuelKey) {
+  const prices = stations.map((s) => priceForFuel(s, fuelKey)).filter((p) => p != null);
+  if (!prices.length) return null;
+  return Math.round(prices.reduce((a, b) => a + b, 0) / prices.length);
 }
 
 function formatMoney(clp) {
@@ -267,6 +287,20 @@ function syncBrandFilterUi() {
   invalidateMapSize();
 }
 
+function renderTrendBadge(priceChanges, fuelKey) {
+  if (!priceChanges) return null;
+  const change = priceChanges[fuelKey];
+  if (!change || change.direction === "new" || change.direction === "same") return null;
+  const span = document.createElement("span");
+  span.className = "price-trend";
+  span.style.color = TREND_COLOR[change.direction] || "";
+  span.title = change.direction === "up"
+    ? `Subió $${change.delta} desde la última consulta`
+    : `Bajó $${change.delta} desde la última consulta`;
+  span.textContent = `${TREND_ICON[change.direction]}$${change.delta}`;
+  return span;
+}
+
 function renderList() {
   const all = lastPayload?.stations || [];
   if (!all.length) {
@@ -288,6 +322,7 @@ function renderList() {
   const fuelKey = fuelFilterEl.value;
   const ordered = sortedStations(visible, fuelKey, sortMode);
   const cheapest = cheapestIdForFuel(visible, fuelKey);
+  const avgPrice = averagePriceForFuel(visible, fuelKey);
 
   stationListEl.innerHTML = "";
   for (const s of ordered) {
@@ -320,27 +355,51 @@ function renderList() {
     const dist = document.createElement("span");
     dist.textContent = `${s.distanceKm.toFixed(2)} km`;
 
-    const priceSpan = document.createElement("span");
-    priceSpan.className = "station-card__price";
+    const priceWrap = document.createElement("span");
+    priceWrap.className = "station-card__price";
     if (pf != null) {
-      priceSpan.innerHTML = `<strong>${FUEL_LABELS[fuelKey] || fuelKey}:</strong> ${formatMoney(pf)}`;
+      const strong = document.createElement("strong");
+      strong.textContent = `${FUEL_LABELS[fuelKey] || fuelKey}: `;
+      priceWrap.appendChild(strong);
+      priceWrap.append(formatMoney(pf));
+
+      const trend = renderTrendBadge(s.priceChanges, fuelKey);
+      if (trend) priceWrap.appendChild(trend);
+
+      if (avgPrice && s.id !== cheapest && pf > avgPrice) {
+        const diff = pf - avgPrice;
+        const saveSpan = document.createElement("span");
+        saveSpan.className = "price-vs-avg price-vs-avg--above";
+        saveSpan.textContent = `+$${diff.toLocaleString("es-CL")} vs prom.`;
+        priceWrap.appendChild(saveSpan);
+      } else if (avgPrice && s.id !== cheapest && pf < avgPrice) {
+        const diff = avgPrice - pf;
+        const saveSpan = document.createElement("span");
+        saveSpan.className = "price-vs-avg price-vs-avg--below";
+        saveSpan.textContent = `-$${diff.toLocaleString("es-CL")} vs prom.`;
+        priceWrap.appendChild(saveSpan);
+      }
     } else {
-      priceSpan.innerHTML = `<strong>${FUEL_LABELS[fuelKey] || fuelKey}:</strong> —`;
+      priceWrap.innerHTML = `<strong>${FUEL_LABELS[fuelKey] || fuelKey}:</strong> —`;
     }
 
     const mini = document.createElement("div");
-    mini.className = "station-card__row";
-    mini.style.fontSize = "0.78rem";
-    mini.style.marginTop = "0.35rem";
+    mini.className = "station-card__row station-card__mini";
     const parts = [];
     for (const [k, label] of Object.entries(FUEL_LABELS)) {
       const v = s.prices?.[k];
-      if (v != null) parts.push(`${label.split(" ")[0]} ${formatMoney(v)}`);
+      if (v != null) {
+        const change = s.priceChanges?.[k];
+        const trendStr = change && (change.direction === "up" || change.direction === "down")
+          ? ` ${TREND_ICON[change.direction]}`
+          : "";
+        parts.push(`${label.split(" ")[0]} ${formatMoney(v)}${trendStr}`);
+      }
     }
     mini.textContent = parts.join(" · ");
 
     row.appendChild(dist);
-    row.appendChild(priceSpan);
+    row.appendChild(priceWrap);
 
     const mapsActions = document.createElement("div");
     mapsActions.className = "station-card__maps-actions";
@@ -395,7 +454,23 @@ function showDetail(s) {
     const v = s.prices?.[k];
     if (v == null) continue;
     const li = document.createElement("li");
-    li.innerHTML = `<span>${label}</span><span>${formatMoney(v)}</span>`;
+    const labelSpan = document.createElement("span");
+    labelSpan.textContent = label;
+    const priceSpan = document.createElement("span");
+    priceSpan.className = "detail-price-val";
+    priceSpan.textContent = formatMoney(v);
+
+    const change = s.priceChanges?.[k];
+    if (change && (change.direction === "up" || change.direction === "down")) {
+      const t = document.createElement("span");
+      t.className = "price-trend";
+      t.style.color = TREND_COLOR[change.direction];
+      t.textContent = ` ${TREND_ICON[change.direction]}$${change.delta}`;
+      priceSpan.appendChild(t);
+    }
+
+    li.appendChild(labelSpan);
+    li.appendChild(priceSpan);
     detailPrices.appendChild(li);
   }
 }
@@ -471,7 +546,6 @@ function escapeHtml(str) {
   return d.innerHTML;
 }
 
-/** Para atributo `href` en HTML generado (p. ej. popups Leaflet). */
 function escapeAttr(str) {
   return String(str).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 }
@@ -523,10 +597,10 @@ async function loadStations() {
     }
     if (lastPayload.cneCatalog) {
       const c = lastPayload.cneCatalog;
-      metaParts.push(`${c.tiposCombustibleCount} tipos de combustible, ${c.distribuidoresCount} distribuidores (catálogo CNE)`);
+      metaParts.push(`${c.tiposCombustibleCount} tipos · ${c.distribuidoresCount} distribuidores (CNE)`);
     }
     if (u && typeof u.lat === "number" && typeof u.lng === "number") {
-      metaParts.push(`Mapa/lista: ${u.lat.toFixed(5)}, ${u.lng.toFixed(5)}`);
+      metaParts.push(`${u.lat.toFixed(5)}, ${u.lng.toFixed(5)}`);
     }
     metaParts.push(`Actualizado: ${new Date(lastPayload.updatedAt).toLocaleString("es-CL")}`);
     metaEl.textContent = metaParts.join(" · ");
@@ -543,7 +617,7 @@ async function loadStations() {
       const n = lastPayload.stations.length;
       setStatus(
         v === n
-          ? `${n} estaciones en ${radiusKm} km. Filtra por «Distribuidor» (COPEC, Shell, etc.) arriba.`
+          ? `${n} estaciones en ${radiusKm} km. Filtra por «Distribuidor» arriba.`
           : `${v} de ${n} estaciones con el distribuidor elegido. Radio ${radiusKm} km.`
       );
     }
@@ -567,10 +641,94 @@ function scheduleRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
   refreshTimer = null;
   if (!autoRefreshEl.checked) return;
-  refreshTimer = setInterval(() => {
-    loadStations();
-  }, 5 * 60 * 1000);
+  refreshTimer = setInterval(() => loadStations(), 5 * 60 * 1000);
 }
+
+// ─── Address Geocoding ────────────────────────────────────────────────────────
+
+function hideSearchResults() {
+  searchResultsEl.hidden = true;
+  searchResultsEl.innerHTML = "";
+}
+
+async function runGeocode(query) {
+  if (!query.trim()) { hideSearchResults(); return; }
+  try {
+    const res = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`);
+    if (!res.ok) { hideSearchResults(); return; }
+    const results = await res.json();
+    if (!Array.isArray(results) || !results.length) {
+      searchResultsEl.hidden = false;
+      searchResultsEl.innerHTML = `<li class="search-result search-result--empty">Sin resultados para "${escapeHtml(query)}"</li>`;
+      return;
+    }
+    searchResultsEl.innerHTML = "";
+    searchResultsEl.hidden = false;
+    for (const r of results) {
+      const li = document.createElement("li");
+      li.className = "search-result";
+      li.textContent = r.short_name || r.display_name;
+      li.title = r.display_name;
+      li.addEventListener("click", () => {
+        addressSearchEl.value = r.short_name || r.display_name;
+        hideSearchResults();
+        applyUserPosition(r.lat, r.lng, `Ubicación: ${r.short_name || r.display_name}. Cargando precios…`);
+        saveLastLocation(r.lat, r.lng);
+      });
+      searchResultsEl.appendChild(li);
+    }
+  } catch {
+    hideSearchResults();
+  }
+}
+
+addressSearchEl.addEventListener("input", () => {
+  clearTimeout(geocodeTimer);
+  const q = addressSearchEl.value.trim();
+  if (q.length < 3) { hideSearchResults(); return; }
+  geocodeTimer = setTimeout(() => runGeocode(q), 450);
+});
+
+btnSearchGeo.addEventListener("click", () => {
+  const q = addressSearchEl.value.trim();
+  if (q) runGeocode(q);
+});
+
+addressSearchEl.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { hideSearchResults(); return; }
+  if (e.key === "Enter") {
+    e.preventDefault();
+    const q = addressSearchEl.value.trim();
+    if (q) runGeocode(q);
+  }
+});
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".search-bar")) hideSearchResults();
+});
+
+// ─── Last Known Location ──────────────────────────────────────────────────────
+
+function saveLastLocation(lat, lng) {
+  try {
+    localStorage.setItem(LAST_LOCATION_KEY, JSON.stringify({ lat, lng, ts: Date.now() }));
+  } catch {}
+}
+
+function loadLastLocation() {
+  try {
+    const raw = localStorage.getItem(LAST_LOCATION_KEY);
+    if (!raw) return null;
+    const { lat, lng, ts } = JSON.parse(raw);
+    if (!lat || !lng) return null;
+    if (Date.now() - ts > 24 * 3600 * 1000) return null;
+    return { lat, lng };
+  } catch {
+    return null;
+  }
+}
+
+// ─── Geolocation ─────────────────────────────────────────────────────────────
 
 function geolocationGetCurrent(options) {
   return new Promise((resolve, reject) => {
@@ -578,7 +736,6 @@ function geolocationGetCurrent(options) {
   });
 }
 
-/** Una lectura con watchPosition; se cancela al primer fix o al timeout (mejor en algunos Android). */
 function geolocationWatchOnce(options, timeoutMs) {
   return new Promise((resolve, reject) => {
     let watchId = null;
@@ -607,9 +764,9 @@ function geolocationWatchOnce(options, timeoutMs) {
 function geoErrorMessage(code) {
   switch (code) {
     case 1:
-      return "Ubicación denegada: en el celular, permita el permiso de ubicación para este sitio (icono de candado o ajustes del navegador).";
+      return "Ubicación denegada: permita el acceso a la ubicación en ajustes del navegador.";
     case 2:
-      return "Ubicación no disponible: active el GPS y los servicios de ubicación; pruebe al aire libre o cerca de una ventana.";
+      return "Ubicación no disponible: active el GPS e intente al aire libre.";
     case 3:
       return "Tiempo agotado esperando el GPS: pulse «Pedir ubicación» de nuevo.";
     default:
@@ -644,21 +801,18 @@ async function tryAllGeoStrategies() {
 
 async function getLocation() {
   if (!navigator.geolocation) {
-    applyUserPosition(
-      -33.4489,
-      -70.6693,
-      "Este navegador no expone geolocalización. Se usará una ubicación de referencia (Santiago).",
-      true
-    );
+    const last = loadLastLocation();
+    if (last) {
+      applyUserPosition(last.lat, last.lng, "GPS no disponible. Usando última ubicación conocida.", true);
+    } else {
+      applyUserPosition(-33.4489, -70.6693, "Este navegador no soporta geolocalización. Referencia: Santiago.", true);
+    }
     return;
   }
 
   const insecure = isLikelyInsecureGeoBlocked();
   if (insecure) {
-    setStatus(
-      "Página en HTTP (sin HTTPS): en el celular el GPS suele estar bloqueado si entra por http://192.168… Intentando ubicación; si falla, use HTTPS o un túnel (p. ej. ngrok).",
-      true
-    );
+    setStatus("Página en HTTP (sin HTTPS): el GPS puede estar bloqueado en el celular. Intentando…", true);
     await new Promise((r) => setTimeout(r, 500));
   } else {
     setStatus("Buscando ubicación (GPS + red, varios intentos)…");
@@ -668,41 +822,110 @@ async function getLocation() {
     if (navigator.permissions?.query) {
       const r = await navigator.permissions.query({ name: "geolocation" });
       if (r.state === "denied") {
-        const extra = insecure
-          ? " Además, sin HTTPS el navegador suele no permitir ubicación desde la red local."
-          : "";
-        applyUserPosition(
-          -33.4489,
-          -70.6693,
-          `${geoErrorMessage(1)}${extra} Referencia: Santiago centro.`,
-          true
-        );
+        const extra = insecure ? " Sin HTTPS el navegador bloquea ubicación desde la red local." : "";
+        const last = loadLastLocation();
+        if (last) {
+          applyUserPosition(last.lat, last.lng, `${geoErrorMessage(1)}${extra} Usando última ubicación guardada.`, true);
+        } else {
+          applyUserPosition(-33.4489, -70.6693, `${geoErrorMessage(1)}${extra} Referencia: Santiago centro.`, true);
+        }
         return;
       }
     }
-  } catch {
-    /* Permissions API no disponible o falla en algunos móviles */
-  }
+  } catch {}
 
   try {
     const pos = await tryAllGeoStrategies();
     const lat = pos.coords.latitude;
     const lng = pos.coords.longitude;
-    const acc = pos.coords.accuracy != null ? ` ±${Math.round(pos.coords.accuracy)} m` : "";
-    applyUserPosition(lat, lng, `Ubicación obtenida${acc}. Cargando precios…`);
+    const acc = pos.coords.accuracy;
+    const accStr = acc != null ? ` ±${Math.round(acc)} m` : "";
+    saveLastLocation(lat, lng);
+    applyUserPosition(lat, lng, `Ubicación obtenida${accStr}. Cargando precios…`, false, acc);
   } catch (err) {
     const code = err && typeof err.code === "number" ? err.code : 0;
-    const extra = insecure
-      ? " Si entra por http://192.168… en el celular, configure HTTPS o un túnel."
-      : "";
-    applyUserPosition(
-      -33.4489,
-      -70.6693,
-      `${geoErrorMessage(code)}${extra} Referencia temporal: Santiago centro.`,
-      true
-    );
+    const extra = insecure ? " Configure HTTPS o un túnel (ngrok) para el celular." : "";
+    const last = loadLastLocation();
+    if (last) {
+      applyUserPosition(last.lat, last.lng, `${geoErrorMessage(code)}${extra} Usando última ubicación guardada.`, true);
+    } else {
+      applyUserPosition(-33.4489, -70.6693, `${geoErrorMessage(code)}${extra} Referencia: Santiago centro.`, true);
+    }
   }
 }
+
+// ─── AI Chat ─────────────────────────────────────────────────────────────────
+
+function aiPanelOpen() {
+  aiPanelEl.hidden = false;
+  aiInputEl.focus();
+}
+
+function aiPanelClose() {
+  aiPanelEl.hidden = true;
+}
+
+function appendAiMessage(text, role) {
+  const div = document.createElement("div");
+  div.className = `ai-msg ai-msg--${role}`;
+  const span = document.createElement("span");
+  span.textContent = text;
+  div.appendChild(span);
+  aiMessagesEl.appendChild(div);
+  aiMessagesEl.scrollTop = aiMessagesEl.scrollHeight;
+  return div;
+}
+
+function appendAiThinking() {
+  const div = document.createElement("div");
+  div.className = "ai-msg ai-msg--bot ai-msg--thinking";
+  div.innerHTML = `<span><span class="ai-dot"></span><span class="ai-dot"></span><span class="ai-dot"></span></span>`;
+  aiMessagesEl.appendChild(div);
+  aiMessagesEl.scrollTop = aiMessagesEl.scrollHeight;
+  return div;
+}
+
+aiFormEl.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const message = aiInputEl.value.trim();
+  if (!message) return;
+  aiInputEl.value = "";
+  aiInputEl.disabled = true;
+
+  appendAiMessage(message, "user");
+  const thinking = appendAiThinking();
+
+  try {
+    const res = await fetch("/api/ai/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        stations: lastPayload?.stations || [],
+        userLocation: userLat != null ? { lat: userLat, lng: userLng } : null,
+        fuelType: fuelFilterEl.value,
+      }),
+    });
+    const data = await res.json();
+    thinking.remove();
+    if (data.ok && data.reply) {
+      appendAiMessage(data.reply, "bot");
+    } else {
+      appendAiMessage(data.error || "No pude obtener respuesta.", "bot");
+    }
+  } catch {
+    thinking.remove();
+    appendAiMessage("Error de conexión con el asistente.", "bot");
+  } finally {
+    aiInputEl.disabled = false;
+    aiInputEl.focus();
+  }
+});
+
+btnAiOpen.addEventListener("click", aiPanelOpen);
+btnAiClose.addEventListener("click", aiPanelClose);
+
+// ─── Controls ─────────────────────────────────────────────────────────────────
 
 document.querySelectorAll(".segmented__btn").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -736,7 +959,6 @@ btnGeo.addEventListener("click", () => getLocation());
 autoRefreshEl.addEventListener("change", scheduleRefresh);
 
 window.addEventListener("resize", () => invalidateMapSize());
-
 detailClose.addEventListener("click", hideDetail);
 
 getLocation();

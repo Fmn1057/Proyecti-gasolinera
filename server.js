@@ -1,20 +1,10 @@
-/**
- * Servidor Express: estaciones cercanas con precios.
- * - CNE_API_TOKEN: Bearer fijo hacia https://api.cne.cl/api/v4/estaciones
- * - O CNE_EMAIL + CNE_PASSWORD: POST https://api.cne.cl/api/login (form urlencoded) → token
- * - Sin credenciales o error al consultar la CNE: respuesta de error (no hay precios inventados).
- * - Tras una descarga correcta se guarda data/cne-stations-backup.json; si la CNE falla, se sirve ese respaldo.
- *   Opcional: CNE_STATIONS_BACKUP_PATH, CNE_BACKUP_MAX_AGE_HOURS.
- * - Con CNE_EMAIL+CNE_PASSWORD: el token nuevo del login puede guardarse en .env (CNE_API_TOKEN). Desactivar: CNE_PERSIST_TOKEN_TO_ENV=0
- * - data/station-corrections.json: ajustes locales por id CNE (coords, dirección, ocultar). Ver station-corrections.example.json
- */
-
 const path = require("path");
 const fs = require("fs/promises");
 const DOTENV_PATH = path.join(__dirname, ".env");
 require("dotenv").config({ path: DOTENV_PATH });
 const express = require("express");
 const cors = require("cors");
+const Anthropic = require("@anthropic-ai/sdk");
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -58,7 +48,67 @@ let cneCatalogCache = null;
 let cneCatalogInFlight = null;
 
 app.use(cors());
+app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
+
+const PRICE_HISTORY_PATH = path.join(__dirname, "data", "price-history.json");
+
+const FUEL_LABELS_SERVER = {
+  gasolina_93: "Gasolina 93",
+  gasolina_95: "Gasolina 95",
+  gasolina_97: "Gasolina 97",
+  petroleo_diesel: "Diésel",
+  glp_vehicular: "GLP vehicular",
+};
+
+async function loadPriceHistory() {
+  try {
+    const raw = await fs.readFile(PRICE_HISTORY_PATH, "utf8");
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
+async function savePriceHistory(history) {
+  try {
+    const dir = path.dirname(PRICE_HISTORY_PATH);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(PRICE_HISTORY_PATH, JSON.stringify(history), "utf8");
+  } catch (e) {
+    console.warn("[history] No se pudo guardar historial:", e.message);
+  }
+}
+
+function enrichWithPriceTrends(stations, history) {
+  const now = new Date().toISOString();
+  const newHistory = {};
+  const enriched = stations.map((s) => {
+    const prevEntry = history[s.id];
+    const prevPrices = prevEntry?.prices || {};
+    const priceChanges = {};
+    for (const [fuel, price] of Object.entries(s.prices || {})) {
+      const prev = prevPrices[fuel];
+      if (prev == null) {
+        priceChanges[fuel] = { direction: "new", delta: 0 };
+      } else if (price > prev.price) {
+        priceChanges[fuel] = { direction: "up", delta: price - prev.price };
+      } else if (price < prev.price) {
+        priceChanges[fuel] = { direction: "down", delta: prev.price - price };
+      } else {
+        priceChanges[fuel] = { direction: "same", delta: 0 };
+      }
+    }
+    newHistory[s.id] = {
+      prices: Object.fromEntries(
+        Object.entries(s.prices || {}).map(([fuel, price]) => [fuel, { price, date: now }])
+      ),
+      updatedAt: now,
+    };
+    return { ...s, priceChanges };
+  });
+  return { enriched, newHistory };
+}
 
 const EARTH_KM = 6371;
 
@@ -1035,12 +1085,89 @@ app.get("/api/stations", async (req, res) => {
   }
 
   const stationsAdj = applyStationCorrections(cne.stations, corrections);
-  const payload = buildStationsSuccessPayload(lat, lng, radiusKm, stationsAdj, cne.catalog, {
+  const history = await loadPriceHistory();
+  const { enriched, newHistory } = enrichWithPriceTrends(stationsAdj, history);
+  const payload = buildStationsSuccessPayload(lat, lng, radiusKm, enriched, cne.catalog, {
     source: "cne",
     updatedAt: new Date().toISOString(),
   });
   res.json(payload);
   saveCneStationsBackup(cne);
+  savePriceHistory(newHistory);
+});
+
+app.get("/api/geocode", async (req, res) => {
+  const q = String(req.query.q || "").trim();
+  if (!q) return res.status(400).json({ error: "Parámetro q requerido." });
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q + ", Chile")}&limit=5&countrycodes=cl`;
+    const r = await fetch(url, {
+      headers: { "User-Agent": "BencinasChile/2.0 (fuel-prices-cl)" },
+    });
+    const data = await r.json();
+    if (!Array.isArray(data)) return res.status(502).json({ error: "Respuesta inválida del geocodificador." });
+    res.json(
+      data.map((item) => ({
+        display_name: item.display_name,
+        short_name: item.display_name.split(",").slice(0, 2).join(",").trim(),
+        lat: parseFloat(item.lat),
+        lng: parseFloat(item.lon),
+      }))
+    );
+  } catch (e) {
+    console.error("[geocode]", e.message);
+    res.status(502).json({ error: "Error al geocodificar la dirección." });
+  }
+});
+
+app.post("/api/ai/chat", async (req, res) => {
+  const apiKey = String(process.env.ANTHROPIC_API_KEY || "").trim();
+  if (!apiKey) {
+    return res.status(503).json({ ok: false, error: "ANTHROPIC_API_KEY no configurado en el servidor (.env)." });
+  }
+  const { message, stations, userLocation, fuelType } = req.body || {};
+  if (!message || typeof message !== "string" || !message.trim()) {
+    return res.status(400).json({ ok: false, error: "Mensaje requerido." });
+  }
+
+  const topStations = (Array.isArray(stations) ? stations : []).slice(0, 25);
+  const stationsContext = topStations
+    .map((s) => {
+      const prices = Object.entries(s.prices || {})
+        .map(([k, v]) => `${FUEL_LABELS_SERVER[k] || k}: $${v.toLocaleString("es-CL")}`)
+        .join(", ");
+      const trend = s.priceChanges
+        ? Object.entries(s.priceChanges)
+            .filter(([, c]) => c.direction === "up" || c.direction === "down")
+            .map(([k, c]) => `${FUEL_LABELS_SERVER[k]?.split(" ")[0] || k} ${c.direction === "up" ? "↑" : "↓"}$${c.delta}`)
+            .join(" ")
+        : "";
+      return `• ${s.name} (${s.marca || "sin marca"}) — ${s.address}, ${s.comuna} — ${s.distanceKm}km${prices ? " — " + prices : ""}${trend ? " — Cambios: " + trend : ""}`;
+    })
+    .join("\n");
+
+  const systemPrompt = `Eres el asistente de "Bencinas Chile", una app para conductores chilenos que buscan los mejores precios de combustible. Respondes en español chileno, de forma concisa y directa. Puedes calcular ahorros, comparar precios, recomendar estaciones y responder dudas sobre combustibles.
+
+Datos actuales:
+Combustible seleccionado: ${FUEL_LABELS_SERVER[fuelType] || fuelType || "Gasolina 95"}
+Ubicación: ${userLocation ? `${Number(userLocation.lat).toFixed(5)}, ${Number(userLocation.lng).toFixed(5)}` : "desconocida"}
+
+${topStations.length ? `Estaciones cercanas (${topStations.length} de las más próximas):\n${stationsContext}` : "No hay datos de estaciones disponibles."}`;
+
+  try {
+    const client = new Anthropic({ apiKey });
+    const response = await client.messages.create({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 600,
+      system: systemPrompt,
+      messages: [{ role: "user", content: message.trim() }],
+    });
+    const reply = response.content.find((b) => b.type === "text")?.text || "";
+    res.json({ ok: true, reply });
+  } catch (e) {
+    console.error("[AI]", e.message || e);
+    res.status(500).json({ ok: false, error: "Error al procesar la consulta con IA." });
+  }
 });
 
 app.listen(PORT, () => {
