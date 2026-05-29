@@ -136,3 +136,4 @@ Tras actualizar el código del **servidor** (`server.js`), reinicia con `Ctrl+C`
 ## Licencia de datos
 
 Los datos oficiales son responsabilidad de la CNE; esta app solo los consume y muestra errores si no puede obtenerlos.
+
