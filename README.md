@@ -27,7 +27,7 @@ Todo el proyecto es **JavaScript**: no hay Java.
 ## Instalación y ejecución
 
 ```bash
-cd "C:\Users\matia\Desktop\Proyecti gasolinera"
+cd ruta/al/proyecto
 npm install
 npm start
 ```
